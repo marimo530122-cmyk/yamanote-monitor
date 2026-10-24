@@ -448,6 +448,11 @@ setInterval(moveTrain, 60);
 
 // ---------- 判定ロジック（軽量・ルールベース） ----------
 // 独自のルールによる算出値です（実際の予測ではありません）
+let officialText = '';  // 実データのときの公式文面
+let dataTime = '';      // 実データの生成時刻（dc:date）
+let realOk = false;     // 実データが正しく取れているか
+let unlocated = false;  // 「場所を特定できない運行情報」があるか
+
 function analyze() {
   let warn = 0, delay = 0;
   for (const v of seg) {
@@ -455,14 +460,16 @@ function analyze() {
     if (v === 2) delay++;
   }
 
-  // リスク％ = 基礎値 + 予兆×10 + 遅延×28（上限99）
-  const risk = Math.min(99, 5 + warn * 10 + delay * 28);
+  // リスク％：区間に問題がなければ基礎値。場所の特定できない情報だけなら15％の目安
+  const risk = warn + delay === 0
+    ? (unlocated ? 15 : 5)
+    : Math.min(99, 5 + warn * 10 + delay * 28);
   const minutes = delay * 5 + warn * 2;
   const level = risk < 25 ? '低' : risk < 55 ? '中' : '高';
 
-  // 段階：遅延の記載がなければ MONITOR、あれば ALERT、
+  // 段階：運行情報の記載がなければ MONITOR、あれば ALERT、
   // さらにリスクが55%以上なら CRITICAL（記載の裏付けがあるときだけ）
-  const hasRecord = warn + delay > 0;
+  const hasRecord = warn + delay > 0 || unlocated;
   const stage = !hasRecord ? 'MONITOR' : risk >= 55 ? 'CRITICAL' : 'ALERT';
 
   // 遅延区間の隣が予兆なら「波及の恐れ」
@@ -479,9 +486,6 @@ function analyze() {
 }
 
 // ---------- 画面の更新 ----------
-let officialText = '';  // 実データのときの公式文面
-let dataTime = '';      // 実データの生成時刻（dc:date）
-let realOk = false;     // 実データが正しく取れているか
 
 // 実データが取れていないときの表示（「平常」とは言わない）
 function showUnknown() {
@@ -511,6 +515,8 @@ function render() {
     return;
   }
   const r = analyze();
+  // 模擬データのときは、必ず「模擬」と表示する（実データと誤解されないため）
+  const tag = USE_REAL ? '' : '【模擬】';
   centerText.textContent = 'YAMANOTE';
 
   // 区間の色
@@ -519,21 +525,29 @@ function render() {
   });
 
   // 見出し：先頭は段階の言葉（MONITOR／ALERT／CRITICAL）、後ろは事実
-  const overall = r.delay > 0 ? 2 : r.warn > 0 ? 1 : 0;
-  const fact =
-    overall === 2 ? '遅延発生中' :
-    overall === 1 ? '一部区間 予兆あり' : '全線 平常運転';
+  const overall = r.delay > 0 ? 2 : (r.warn > 0 || unlocated) ? 1 : 0;
+  let fact;
+  if (r.delay > 0) fact = '遅延発生中';
+  else if (r.warn > 0) fact = '一部区間 予兆あり';
+  else if (unlocated) fact = '運行情報あり（場所は公式情報で確認）';
+  else fact = '全線 平常運転';
+
   const headline = $('headline');
-  headline.textContent = `${r.stage}：${fact}`;
+  headline.textContent = `${tag}${r.stage}：${fact}`;
   headline.style.color =
     overall === 2 ? 'var(--delay)' :
     overall === 1 ? 'var(--warn)' : 'var(--normal)';
   headline.classList.toggle('critical', r.stage === 'CRITICAL');
 
-  const detailBase = r.firstBad === -1
-    ? '現在、遅れ・予兆は確認されていません'
-    : `${r.badPlace}に${r.delay > 0 ? '遅延' : '予兆'}` +
+  let detailBase;
+  if (r.firstBad !== -1) {
+    detailBase = `${r.badPlace}に${r.delay > 0 ? '遅延' : '予兆'}` +
       (r.spreading ? '（隣の区間に波及の恐れ）' : '');
+  } else if (unlocated) {
+    detailBase = '場所を特定できない運行情報があります。JR東日本の公式情報で確認してください';
+  } else {
+    detailBase = '現在、遅れ・予兆は確認されていません';
+  }
   $('detail').textContent = detailBase + ' ／ 監視を継続中';
 
   // リスク表示（数字の下の注記は HTML 側に固定で入っています）
@@ -549,16 +563,20 @@ function render() {
   $('est-min').textContent = r.minutes;
 
   // テロップ（段階名つき。今後数分以内のリスクを必ず含める）
-  const tickerText = $('ticker-text');
   let msg;
-  if (r.firstBad === -1) {
-    msg = `【${r.stage}｜運行情報】全線平常運転中 ／ 今後数分以内の遅延リスク：低（${r.risk}%）`;
-  } else {
+  if (r.firstBad !== -1) {
     msg = `【${r.stage}｜運行情報】${r.badPlace}で${r.delay > 0 ? '遅延' : '予兆'}` +
       ` ／ 今後数分以内の遅延リスク：${r.level}（${r.risk}%・推定${r.minutes}分の遅れ）` +
       (r.spreading ? ' ／ 隣接区間に波及の恐れ' : '');
+  } else if (unlocated) {
+    msg = `【${r.stage}｜運行情報】場所を特定できない運行情報あり` +
+      ` ／ 今後数分以内の遅延リスク：${r.level}（${r.risk}%）`;
+  } else {
+    msg = `【${r.stage}｜運行情報】全線平常運転中 ／ 今後数分以内の遅延リスク：低（${r.risk}%）`;
   }
+  msg = tag + msg;
   if (USE_REAL && officialText) msg += ` ／ 公式文面：${officialText}`;
+  const tickerText = $('ticker-text');
   if (tickerText.textContent !== msg) tickerText.textContent = msg;
   document.querySelector('.ticker').classList.toggle('alert', r.delay > 0);
 
@@ -635,6 +653,24 @@ function textOf(v) {
   return v.ja || v.en || '';
 }
 
+// 文章の中にある駅名を、出てきた順に返す。
+// 「西日暮里」の中の「日暮里」のように、長い駅名を先に見つけて、二重に数えないようにする。
+function locateStations(text) {
+  let t = text;
+  const found = [];
+  const byLength = STATIONS.map((_, i) => i)
+    .sort((x, y) => STATIONS[y].length - STATIONS[x].length);
+  for (const i of byLength) {
+    const name = STATIONS[i];
+    const p = t.indexOf(name);
+    if (p !== -1) {
+      found.push({ i, p });
+      t = t.split(name).join('□'.repeat(name.length));
+    }
+  }
+  return found.sort((a, b) => a.p - b.p).map((f) => f.i);
+}
+
 async function fetchReal() {
   try {
     const res = await fetch(ODPT_URL + ODPT_TOKEN);
@@ -648,22 +684,36 @@ async function fetchReal() {
     realOk = dataTime !== '';
     if (!realOk) throw new Error('データの時刻が取得できません');
 
-    // 公式文面を読んで、駅名が入っている区間を「遅延」、それ以外の問題は「予兆」にする簡易ルール
+    // 公式文面の駅名から区間を決める。
+    // 駅名が一つ：その駅の前後の区間を「遅延」。
+    // 駅名が二つ（例：鶯谷〜日暮里）：間の区間を「遅延」。
+    // 駅名が無い：色は変えず、「場所を特定できない」として別に表示。
     seg.fill(0);
-    if (texts.length === 0) {
-      officialText = '現在、遅延等の情報はありません';
-    } else {
-      officialText = texts.join(' ／ ');
-      let matched = false;
-      STATIONS.forEach((name, i) => {
-        if (texts.some((t) => t.includes(name))) {
-          seg[(i - 1 + N) % N] = 2;
-          seg[i] = 2;
-          matched = true;
-        }
-      });
-      if (!matched) seg.fill(1); // 場所が特定できないときは全線を予兆扱い
-    }
+    unlocated = false;
+    texts.forEach((t) => {
+      const hits = locateStations(t);
+      if (hits.length === 0) {
+        unlocated = true;
+        return;
+      }
+      if (hits.length === 1) {
+        const i = hits[0];
+        seg[(i - 1 + N) % N] = 2;
+        seg[i] = 2;
+        return;
+      }
+      const a = hits[0], b = hits[1];
+      const d = (b - a + N) % N;
+      if (d <= N / 2) {
+        for (let k = 0; k < d; k++) seg[(a + k) % N] = 2;
+      } else {
+        for (let k = 0; k < N - d; k++) seg[(b + k) % N] = 2;
+      }
+    });
+
+    officialText = texts.length === 0
+      ? '現在、遅延等の情報はありません'
+      : texts.join(' ／ ');
 
     addLog('[SYSTEM] 定期通信シーケンス実行中… データリンク正常', 'ai');
     addLog(`[ODPT] 運行情報を取得：遅延の記載 ${texts.length} 件`, texts.length ? 'alert' : '');
@@ -705,6 +755,8 @@ function startMode() {
   timers.forEach(clearInterval);
   timers = [];
   USE_REAL = ODPT_TOKEN !== '';
+  unlocated = false;
+  seg.fill(0);
 
   if (USE_REAL) {
     addLog('実データモードで動作中（ODPT）', 'ai');
